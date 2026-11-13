@@ -47,7 +47,8 @@ def evaluate(
     video_frame_skip=3,
     action_dim=None,
     action_chunk_eval_size=None,
-    best_of_n_override=None
+    best_of_n_override=None,
+    report_wrong_buttons=False,
     # max_episode_length=None,
 ):
     """Evaluate the agent in the environment.
@@ -137,7 +138,16 @@ def evaluate(
 
         # print(step)
         if i < num_eval_episodes:
-            add_to(stats, flatten(info))
+            episode_info = flatten(info)
+            if report_wrong_buttons:
+                unwrapped = getattr(env, 'unwrapped', env)
+                current = getattr(unwrapped, '_cur_button_states', None)
+                target = getattr(unwrapped, '_target_button_states', None)
+                if current is not None and target is not None:
+                    episode_info['episode.final_wrong_buttons'] = float(
+                        np.count_nonzero(np.asarray(current) != np.asarray(target))
+                    )
+            add_to(stats, episode_info)
             trajs.append(traj)
         else:
             renders.append(np.array(render))

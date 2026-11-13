@@ -260,3 +260,101 @@ class CGCDataset(GCDataset):
         batch['rewards'] = successes
 
         return batch
+
+
+@dataclasses.dataclass
+class CSingleDataset:
+    """Unconditional action-chunk dataset for fixed-task sparse puzzles.
+
+    Compact OGBench rows retain terminal-only observations. TD mode follows
+    CGCDataset's conservative full-chunk boundary rule. Graph mode follows the
+    target artifact's rule, which permits a terminal on the last action; the
+    retained terminal-only observation supplies that chunk's endpoint. Neither
+    mode samples a chunk that crosses an episode boundary.
+    """
+
+    dataset: Dataset
+    config: Any
+
+    def __post_init__(self):
+        self.size = self.dataset.size
+        self.terminal_locs = np.flatnonzero(np.asarray(self.dataset['terminals']) > 0)
+        if not len(self.terminal_locs) or self.terminal_locs[-1] != self.size - 1:
+            raise ValueError('single-task compact dataset must end on a terminal row')
+        horizon = int(self.config['backup_horizon'])
+        current = 0
+        valid = []
+        for terminal in self.terminal_locs:
+            valid.append(np.arange(current, int(terminal) + 1 - horizon, dtype=np.int64))
+            current = int(terminal) + 1
+        valid = [part for part in valid if len(part)]
+        dqc_valid_idxs = np.concatenate(valid) if valid else np.empty(0, dtype=np.int64)
+        if self.config.get('critic_mode', 'td') == 'graph':
+            if not all(key in self.dataset for key in (
+                'graph_target', 'graph_target_valid', 'graph_target_loss_mask'
+            )):
+                raise ValueError('graph-mode single-task data is missing graph targets')
+            transition_rows = np.asarray(self.dataset['valids']) > 0
+            graph_valid = (
+                np.asarray(self.dataset['graph_target_valid'], dtype=bool)
+                & np.asarray(self.dataset['graph_target_loss_mask'], dtype=bool)
+                & transition_rows
+            )
+            # The graph target convention allows a terminal on the last action
+            # of a full chunk. Compact data keeps that terminal next-state row,
+            # so the endpoint remains available without crossing episodes.
+            self.dataset.valid_idxs = np.flatnonzero(graph_valid)
+        else:
+            self.dataset.valid_idxs = dqc_valid_idxs
+        if not len(self.dataset.valid_idxs):
+            raise ValueError('dataset has no complete action chunks for backup_horizon')
+        if 'masks' not in self.dataset or 'button_states' not in self.dataset:
+            raise ValueError('single-task puzzle data requires OGBench masks and button_states')
+
+    def sample(self, batch_size: int, idxs=None, evaluation=False):
+        if idxs is None:
+            idxs = self.dataset.get_random_idxs(batch_size)
+        idxs = np.asarray(idxs, dtype=np.int64)
+        batch = self.dataset.sample(batch_size, idxs)
+        horizon = int(self.config['backup_horizon'])
+        offsets = np.arange(horizon, dtype=np.int64)
+        action_idxs = idxs[:, None] + offsets[None, :]
+        batch['high_value_action_chunks'] = self.dataset['actions'][action_idxs].reshape(
+            len(idxs), -1
+        )
+        batch['high_value_next_observations'] = self.get_observations(idxs + horizon)
+        batch['high_value_goals'] = None
+        batch['high_value_offsets'] = np.full(len(idxs), horizon, dtype=np.int64)
+        batch['valids'] = np.ones((len(idxs), horizon), dtype=np.float32)
+
+        # OGBench's relabeler marks whether each compact state already meets
+        # the fixed puzzle goal. Label first success at s[t+k] by gamma**k.
+        state_success = np.asarray(self.dataset['masks']) == 0
+        future = state_success[idxs[:, None] + np.arange(1, horizon + 1)[None, :]]
+        has_success = np.any(future, axis=1)
+        first_k = np.argmax(future, axis=1).astype(np.int32) + 1
+        starts_success = state_success[idxs]
+        success = has_success | starts_success
+        k = np.where(starts_success, 0, first_k)
+        batch['high_value_backup_horizon'] = np.where(success, k, horizon).astype(np.int32)
+        batch['high_value_masks'] = (~success).astype(np.float32)
+        batch['high_value_rewards'] = np.where(
+            success, np.power(float(self.config['discount']), k), 0.0
+        ).astype(np.float32)
+
+        if 'graph_target' in self.dataset:
+            for key in ('graph_target', 'graph_target_valid', 'graph_target_loss_mask'):
+                batch[key] = self.dataset[key][idxs]
+        return batch
+
+    def get_observations(self, idxs):
+        return jax.tree_util.tree_map(lambda arr: arr[idxs], self.dataset['observations'])
+
+
+def make_task_dataset(task_mode, dataset, config, goal_dataset_class=CGCDataset):
+    """Select DQC's original goal path or its fixed-task single path."""
+    if task_mode == 'goal':
+        return goal_dataset_class(dataset, config)
+    if task_mode == 'single':
+        return CSingleDataset(dataset, config)
+    raise ValueError("task_mode must be 'goal' or 'single'")

@@ -42,19 +42,31 @@ class DQCAgent(flax.struct.PyTreeNode):
         """Compute the chunk critic loss."""
         rng, _ = jax.random.split(rng)
 
-        next_v = self.network.select('value')(batch['high_value_next_observations'], 
-            goals=batch['high_value_goals'])
-        next_v = jax.nn.sigmoid(next_v)
-        
-        target_v = batch['high_value_rewards'] + \
-            (self.config['discount'] ** batch['high_value_backup_horizon']) * batch['high_value_masks'] * next_v
-        target_v = jnp.clip(target_v, 0, 1)
+        if self.config.get('critic_mode', 'td') == 'graph':
+            if 'graph_target' not in batch:
+                raise ValueError('graph-mode DQC batch is missing graph_target')
+            target_v = jnp.asarray(batch['graph_target'], dtype=jnp.float32)
+            mask = jnp.asarray(batch.get('graph_target_loss_mask', batch['graph_target_valid']), dtype=jnp.float32)
+        else:
+            next_v = self.network.select('value')(
+                batch['high_value_next_observations'], goals=batch['high_value_goals']
+            )
+            next_v = jax.nn.sigmoid(next_v)
+            target_v = batch['high_value_rewards'] + \
+                (self.config['discount'] ** batch['high_value_backup_horizon']) * batch['high_value_masks'] * next_v
+            target_v = jnp.clip(target_v, 0, 1)
+            mask = jnp.ones_like(target_v)
 
         q_logit = self.network.select('chunk_critic')(
             batch['observations'], goals=batch['high_value_goals'], 
             actions=batch['high_value_action_chunks'], params=grad_params)
         q = jax.nn.sigmoid(q_logit)
-        critic_loss = self.bce_loss(q_logit, target_v).mean()
+        per_row_loss = self.bce_loss(q_logit, target_v)
+        if self.config.get('critic_mode', 'td') == 'graph':
+            mask = jnp.broadcast_to(mask, per_row_loss.shape)
+            critic_loss = (per_row_loss * mask).sum() / jnp.maximum(mask.sum(), 1.0)
+        else:
+            critic_loss = per_row_loss.mean()
 
         return critic_loss, {
             'critic_loss': critic_loss,
@@ -99,6 +111,9 @@ class DQCAgent(flax.struct.PyTreeNode):
         total_loss = critic_loss
         info = {'critic_loss': critic_loss, 'q_mean': q.mean(), 'q_max': q.max(), 'q_min': q.min()}
         
+        if self.config.get('critic_mode', 'td') == 'graph':
+            return total_loss, info
+
         ex_actions = batch['high_value_action_chunks'][..., :self.config["ac_action_dim"]]
         
         ex_qs = self.network.select('target_action_critic')(batch['observations'], goals=batch['high_value_goals'], 
@@ -190,7 +205,8 @@ class DQCAgent(flax.struct.PyTreeNode):
             return self.total_loss(batch, grad_params, rng=rng)
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
-        self.target_update(new_network, 'action_critic')
+        if self.config.get('critic_mode', 'td') != 'graph':
+            self.target_update(new_network, 'action_critic')
 
         return self.replace(network=new_network, rng=new_rng), info
     
