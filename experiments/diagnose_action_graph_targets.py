@@ -75,7 +75,7 @@ def _load_checkpoint(run_dir, target_path):
         'critic_mode': flags.get('critic_mode', 'td'),
     }
     dataset = CSingleDataset(data, dataset_config)
-    sample = dataset.sample(1, idxs=np.asarray([int(dataset.valid_idxs[0])]))
+    sample = dataset.sample(1, idxs=np.asarray([int(dataset.dataset.valid_idxs[0])]))
     agent = DQCAgent.create(int(flags.get('seed', 0)), sample, agent_config)
     agent = restore_agent(agent, str(run_dir), 300000)
     return agent, data, expected_id
