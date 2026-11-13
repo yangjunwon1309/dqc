@@ -308,8 +308,12 @@ class CSingleDataset:
             self.dataset.valid_idxs = dqc_valid_idxs
         if not len(self.dataset.valid_idxs):
             raise ValueError('dataset has no complete action chunks for backup_horizon')
-        if 'masks' not in self.dataset or 'button_states' not in self.dataset:
-            raise ValueError('single-task puzzle data requires OGBench masks and button_states')
+        # Fixed-task single-task replay uses the relabeled OGBench `masks`
+        # field for goal success. Puzzle sidecars may additionally carry
+        # `button_states`, but continuous cube tasks do not, and this sampler
+        # never consumes that field.
+        if 'masks' not in self.dataset:
+            raise ValueError('single-task OGBench data requires relabeled masks')
 
     def sample(self, batch_size: int, idxs=None, evaluation=False):
         if idxs is None:
