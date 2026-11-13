@@ -49,7 +49,7 @@ def _load_checkpoint(run_dir, target_path):
     dataset_path = _dataset_path(flags)
     expected_id = _expected_dataset_id(env_name, dataset_path)
 
-    _, raw_data, _ = make_ogbench_env_and_datasets(
+    env, raw_data, _ = make_ogbench_env_and_datasets(
         env_name, dataset_path=dataset_path, compact_dataset=True, add_info=True,
     )
     agent_config = ml_collections.ConfigDict(flags['agent'])
@@ -63,14 +63,17 @@ def _load_checkpoint(run_dir, target_path):
     )
     if attached.h != attach_h:
         raise ValueError(f'{run_dir}: checkpoint graph target horizon mismatch')
+    env.close()
 
     data = Dataset.create(**raw_data)
     data = data.copy(add_or_replace={
         'actions': np.clip(data['actions'], -1 + 1e-5, 1 - 1e-5),
     })
-    dataset_config = agent_config.copy(add_or_replace={
+    dataset_config = {
+        'backup_horizon': int(agent_config['backup_horizon']),
+        'discount': float(agent_config['discount']),
         'critic_mode': flags.get('critic_mode', 'td'),
-    })
+    }
     dataset = CSingleDataset(data, dataset_config)
     sample = dataset.sample(1, idxs=np.asarray([int(dataset.valid_idxs[0])]))
     agent = DQCAgent.create(int(flags.get('seed', 0)), sample, agent_config)
