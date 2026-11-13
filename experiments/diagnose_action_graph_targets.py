@@ -112,13 +112,13 @@ def diagnose(run_dir, target_path, n_pairs=10000, seed=0, batch_size=1024):
         obs = jax.tree_util.tree_map(lambda arr: jnp.asarray(arr[start:end]), observations)
         actions = jnp.asarray(action_chunks[start:end], dtype=jnp.float32)
         logits = agent.network.select('action_critic')(obs, goals=None, actions=actions)
-        values = jax.nn.sigmoid(logits)
         if agent.config['q_agg'] == 'mean':
-            values = values.mean(axis=0)
+            logits = logits.mean(axis=0)
         elif agent.config['q_agg'] == 'min':
-            values = values.min(axis=0)
+            logits = logits.min(axis=0)
         else:
             raise ValueError(f"unsupported q_agg={agent.config['q_agg']}")
+        values = jax.nn.sigmoid(logits)
         pred_parts.append(np.asarray(values, dtype=np.float64))
 
     prediction = np.concatenate(pred_parts)
@@ -156,7 +156,7 @@ def main():
     if args.r6_target_h5 and not args.r6_run:
         parser.error('--r6-target-h5 requires --r6-run')
     result = {
-        'metric': 'Spearman and MAE of sigmoid(q_agg(action_critic)) against h=5 graph y',
+        'metric': 'Spearman and MAE of sigmoid(q_agg(action_critic_logits)) against h=5 graph y',
         'runs': [
             diagnose(args.r2_run, args.target_h5, args.n_pairs, args.seed, args.batch_size),
             diagnose(args.r5_run, args.target_h5, args.n_pairs, args.seed, args.batch_size),
