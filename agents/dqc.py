@@ -23,6 +23,23 @@ def apply_bfn(sample_fn, score_fn, n):
         return y_out
     return fn
 
+
+def _validate_agent_config(config):
+    level = config.get('graph_target_level', 'chunk')
+    if level not in ('chunk', 'action'):
+        raise ValueError("agent.graph_target_level must be 'chunk' or 'action'")
+    if level == 'action':
+        if config.get('critic_mode', 'td') != 'graph':
+            raise ValueError("agent.graph_target_level='action' requires --critic_mode=graph")
+        if config.get('use_chunk_critic', True):
+            raise ValueError("agent.graph_target_level='action' requires use_chunk_critic=False")
+        if (int(config['backup_horizon']) != 5
+                or int(config['policy_chunk_size']) != 5):
+            raise ValueError(
+                "agent.graph_target_level='action' requires "
+                'backup_horizon=policy_chunk_size=5'
+            )
+
 class DQCAgent(flax.struct.PyTreeNode):
     """Decoupled Q-chunking"""
 
@@ -80,6 +97,38 @@ class DQCAgent(flax.struct.PyTreeNode):
 
     def action_critic_loss(self, batch, grad_params, rng):
         """Compute the action critic loss."""
+
+        graph_action_target = (
+            self.config.get('critic_mode', 'td') == 'graph'
+            and self.config.get('graph_target_level', 'chunk') == 'action'
+        )
+        if graph_action_target:
+            _validate_agent_config(self.config)
+            if 'graph_target' not in batch or 'graph_target_loss_mask' not in batch:
+                raise ValueError(
+                    'action-level graph batch requires graph_target and graph_target_loss_mask'
+                )
+            target_v = jnp.asarray(batch['graph_target'], dtype=jnp.float32)
+            mask = jnp.asarray(batch['graph_target_loss_mask'], dtype=jnp.float32)
+            q_logit = self.network.select('action_critic')(
+                batch['observations'],
+                goals=batch['high_value_goals'],
+                actions=batch['high_value_action_chunks'][..., :self.config['ac_action_dim']],
+                params=grad_params,
+            )
+            q = jax.nn.sigmoid(q_logit)
+            per_row_loss = self.bce_loss(q_logit, target_v)
+            mask = jnp.broadcast_to(mask, per_row_loss.shape)
+            critic_loss = (per_row_loss * mask).sum() / jnp.maximum(mask.sum(), 1.0)
+            return critic_loss, {
+                'critic_loss': critic_loss,
+                'q_mean': q.mean(),
+                'q_max': q.max(),
+                'q_min': q.min(),
+                'q_logit_mean': q_logit.mean(),
+                'q_logit_max': q_logit.max(),
+                'q_logit_min': q_logit.min(),
+            }
 
         if self.config["use_chunk_critic"]:
             target_v = self.network.select('chunk_critic')(batch['observations'], goals=batch['high_value_goals'], actions=batch['high_value_action_chunks'])
@@ -276,6 +325,7 @@ class DQCAgent(flax.struct.PyTreeNode):
             example_batch: Example batch.
             config: Configuration dictionary.
         """
+        _validate_agent_config(config)
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
@@ -382,6 +432,7 @@ def get_config():
             
             # DQC horizon parameters
             use_chunk_critic=True,      # Whether or not to use a separate chunked critic
+            graph_target_level='chunk', # Graph target regresses chunk or action critic.
             backup_horizon=25,          # Backing up value from a couple of steps in the future. 
                                         #   Same as the critic chunk size if use_chunk_critic is True.
             policy_chunk_size=1,        # Policy chunk size.

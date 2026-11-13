@@ -142,6 +142,27 @@ def _attach_graph_targets(train_data, target_path, expected_dataset_id, env_name
         train_data[key] = aligned
     return targets
 
+
+def _validate_graph_target_level(agent_config, critic_mode, target_h=None):
+    """Validate the optional direct action-critic graph-target setup."""
+    level = agent_config.get('graph_target_level', 'chunk')
+    if level not in ('chunk', 'action'):
+        raise ValueError("--agent.graph_target_level must be 'chunk' or 'action'")
+    if level != 'action':
+        return
+    if critic_mode != 'graph':
+        raise ValueError("--agent.graph_target_level=action requires --critic_mode=graph")
+    if agent_config.get('use_chunk_critic', True):
+        raise ValueError("--agent.graph_target_level=action requires --agent.use_chunk_critic=False")
+    backup_horizon = int(agent_config['backup_horizon'])
+    policy_chunk_size = int(agent_config['policy_chunk_size'])
+    if backup_horizon != 5 or policy_chunk_size != 5:
+        raise ValueError(
+            'action-level graph targets require backup_horizon=policy_chunk_size=5'
+        )
+    if target_h is not None and int(target_h) != 5:
+        raise ValueError('action-level graph targets require graph target h=5')
+
 def main(_):
     # Set up logger.
     exp_name = get_exp_name(FLAGS.seed)
@@ -183,6 +204,7 @@ def main(_):
 
     if FLAGS.task_mode == 'single' and 'singletask' not in FLAGS.env_name:
         raise ValueError('--task_mode=single requires an OGBench singletask environment')
+    _validate_graph_target_level(config, FLAGS.critic_mode)
     if FLAGS.critic_mode == 'graph':
         if FLAGS.task_mode != 'single':
             raise ValueError('--critic_mode=graph currently requires --task_mode=single')
@@ -197,6 +219,7 @@ def main(_):
             float(config['discount']),
             dataset_path=datasets[0],
         )
+        _validate_graph_target_level(config, FLAGS.critic_mode, target_h=targets.h)
         print({
             'graph_target_kind': targets.kind,
             'graph_target_h': targets.h,
