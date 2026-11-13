@@ -373,7 +373,9 @@ def main(_):
     eval_logger.close()
 
     with open(os.path.join(FLAGS.save_dir, 'token.tk'), 'w') as f:
-        f.write(run.url)
+        # Offline W&B runs have no URL. Training artifacts are already saved;
+        # keep shutdown successful and write an empty token in that case.
+        f.write(run.url or '')
 
 if __name__ == '__main__':
     app.run(main)
